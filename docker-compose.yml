@@ -1,0 +1,160 @@
+services:
+  auth-db:
+    image: postgres:16-alpine
+    container_name: auth-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_AUTH_NAME}
+      POSTGRES_USER: ${DB_AUTH_USER}
+      POSTGRES_PASSWORD: ${DB_AUTH_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_AUTH_USER} -d ${DB_AUTH_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "5433:5432"
+    volumes:
+      - auth_db_data:/var/lib/postgresql/data
+    networks: [bank-net]
+
+  core-db:
+    image: postgres:16-alpine
+    container_name: core-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_CORE_NAME}
+      POSTGRES_USER: ${DB_CORE_USER}
+      POSTGRES_PASSWORD: ${DB_CORE_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_CORE_USER} -d ${DB_CORE_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "5434:5432"
+    volumes:
+      - core_db_data:/var/lib/postgresql/data
+    networks: [bank-net]
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "nc", "-vz", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "2181:2181"
+    networks: [bank-net]
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      KAFKA_LISTENERS: OUTSIDE://:29092,INTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: OUTSIDE://localhost:29092,INTERNAL://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      test: ["CMD", "nc", "-vz", "localhost", "9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    ports:
+      - "29092:29092"
+    networks: [bank-net]
+
+  auth-service:
+    build:
+      context: ../bank-auth-service
+    image: bank-auth-service
+    container_name: auth-service
+    restart: unless-stopped
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://auth-db:5432/${DB_AUTH_NAME}
+      SPRING_DATASOURCE_USERNAME: ${DB_AUTH_USER}
+      SPRING_DATASOURCE_PASSWORD: ${DB_AUTH_PASSWORD}
+      SPRING_LIQUIBASE_ENABLED: "true"
+
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+      APP_JWT_ISSUER: ${JWT_ISSUER:-bank-auth-service}
+      APP_JWT_ACCESS_TOKEN_TTL_SECONDS: ${JWT_ACCESS_TTL:-900}
+      JWT_KEYSTORE_PATH: ${JWT_KEYSTORE_PATH:-classpath:keystore/auth-jwt.p12}
+      JWT_KEYSTORE_PASSWORD: ${JWT_KEYSTORE_PASSWORD:-changeit}
+      JWT_KEY_ALIAS: ${JWT_KEY_ALIAS:-auth-jwt}
+      JWT_KEY_PASSWORD: ${JWT_KEY_PASSWORD:-changeit}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/auth/.well-known/jwks.json >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    ports:
+      - "8081:8081"
+    networks: [bank-net]
+
+  core-service:
+    build:
+      context: ../bank-core-banking-service
+    image: bank-core-banking-service
+    container_name: core-service
+    restart: unless-stopped
+    depends_on:
+      core-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-local}
+
+      SPRING_DATASOURCE_URL: jdbc:postgresql://core-db:5432/${DB_CORE_NAME}
+      SPRING_DATASOURCE_USERNAME: ${DB_CORE_USER}
+      SPRING_DATASOURCE_PASSWORD: ${DB_CORE_PASSWORD}
+      SPRING_LIQUIBASE_ENABLED: "true"
+
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://auth-service:8081/auth/.well-known/jwks.json
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --server-response http://localhost:8082/accounts 2>&1 | grep -q \"HTTP/1.1\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    ports:
+      - "8082:8082"
+    networks: [bank-net]
+
+volumes:
+  auth_db_data:
+  core_db_data:
+
+networks:
+  bank-net:
+    driver: bridge
