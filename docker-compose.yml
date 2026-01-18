@@ -260,7 +260,7 @@ services:
 
   notification-service:
     build:
-      context: .
+      context: ../bank-notification-service
     image: notification-service
     container_name: notification-service
     restart: unless-stopped
