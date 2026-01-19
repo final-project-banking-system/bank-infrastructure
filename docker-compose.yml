@@ -168,6 +168,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -206,6 +208,8 @@ services:
         condition: service_healthy
       auth-service:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -240,6 +244,8 @@ services:
         condition: service_started
       kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -281,6 +287,31 @@ services:
 #    ports:
 #      - "8084:8084"
 #    networks: [ bank-net ]
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    networks: [bank-net]
+    command: >
+      bash -lc '
+        echo "Waiting for Kafka..." &&
+        cub kafka-ready -b kafka:9092 1 60 &&
+
+        echo "Creating topics..." &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic auth.users --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic auth.logins --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic banking.accounts --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic banking.transactions --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic banking.transfers --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic system.errors --partitions 1 --replication-factor 1 &&
+
+        echo "Done." &&
+        kafka-topics --bootstrap-server kafka:9092 --list
+      '
 
 volumes:
   auth_db_data:
